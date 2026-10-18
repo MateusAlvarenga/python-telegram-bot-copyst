@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from telegram import Chat, Update
+from telegram import Bot, BotCommand, BotCommandScopeChat, Chat, Update
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -27,12 +27,31 @@ from bot.handlers import (
 
 logger = logging.getLogger(__name__)
 
+OWNER_COMMANDS = (
+    BotCommand("start", "Iniciar o bot"),
+    BotCommand("help", "Mostrar os comandos"),
+    BotCommand("destino", "Configurar grupo ou canal de destino"),
+    BotCommand("topico", "Configurar ou remover tópico"),
+    BotCommand("id_topico", "Consultar o ID do tópico atual"),
+    BotCommand("caption", "Configurar a transformação da legenda"),
+    BotCommand("status", "Ver a configuração atual"),
+)
+
+
+async def register_owner_commands(bot: Bot, owner_id: int) -> None:
+    await bot.set_my_commands(
+        OWNER_COMMANDS,
+        scope=BotCommandScopeChat(chat_id=owner_id),
+    )
+
 
 async def _post_init(application: Application) -> None:
     config: BotConfig = application.bot_data["config"]
     database = await Database.connect(config.database_url)
     application.bot_data["database"] = database
     logger.info("PostgreSQL connection is ready.")
+    await register_owner_commands(application.bot, config.owner_id)
+    logger.info("Telegram command menu registered for owner %s.", config.owner_id)
 
 
 async def _post_shutdown(application: Application) -> None:

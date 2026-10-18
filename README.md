@@ -21,6 +21,7 @@ Mensagens protegidas contra encaminhamento, mensagens de serviço e outros tipos
 ## Comandos
 
 Use os comandos no chat privado do bot. Apenas o usuário definido por `OWNER_ID` pode configurá-lo.
+Ao iniciar, o bot registra esses comandos no menu do Telegram para o chat privado do proprietário; outras pessoas não recebem esse menu.
 
 | Comando | Descrição |
 | --- | --- |

@@ -1,13 +1,15 @@
 import unittest
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
-from telegram import Chat, Message, MessageEntity, PhotoSize, Update, User
+from telegram import BotCommandScopeChat, Chat, Message, MessageEntity, PhotoSize, Update, User
 
 from bot.config import BotConfig
 from bot.db import BotSettings, Database, _asyncpg_dsn
 from bot.handlers import _is_owner, _media_input, transform_caption
+from bot.main import OWNER_COMMANDS, register_owner_commands
 
 
 class CaptionTransformationTests(unittest.TestCase):
@@ -205,6 +207,19 @@ class OwnerAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _is_owner(private_owner, context))
         self.assertFalse(await _is_owner(other_user, context))
         self.assertFalse(await _is_owner(owner_in_group, context))
+
+
+class OwnerCommandMenuTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registers_commands_only_in_owner_private_chat_scope(self) -> None:
+        bot = SimpleNamespace(set_my_commands=AsyncMock())
+
+        await register_owner_commands(bot, owner_id=123)
+
+        bot.set_my_commands.assert_awaited_once()
+        commands = bot.set_my_commands.await_args.args[0]
+        scope = bot.set_my_commands.await_args.kwargs["scope"]
+        self.assertEqual(commands, OWNER_COMMANDS)
+        self.assertEqual(scope, BotCommandScopeChat(chat_id=123))
 
 
 if __name__ == "__main__":
