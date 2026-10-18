@@ -1,5 +1,9 @@
 # Bot copista de mídias do Telegram
 
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/python-telegram-bot?referralCode=asepsp&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+
 Bot privado que copia mensagens com mídias para um grupo, supergrupo ou canal configurado. O proprietário pode escolher um tópico de fórum e uma regra persistente para as legendas. A configuração fica no PostgreSQL, então continua disponível após reinicializações no Railway.
 
 ## Recursos
