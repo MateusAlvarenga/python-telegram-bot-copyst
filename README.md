@@ -1,191 +1,63 @@
-# Telegram Bot with python-telegram-bot
+# Bot copista de mídias do Telegram
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/python-telegram-bot?referralCode=asepsp&utm_medium=integration&utm_source=template&utm_campaign=generic)
+Bot privado que copia mensagens com mídias para um grupo, supergrupo ou canal configurado. O proprietário pode escolher um tópico de fórum e uma regra persistente para as legendas. A configuração fica no PostgreSQL, então continua disponível após reinicializações no Railway.
 
-A starter Telegram bot project built with [`python-telegram-bot`](https://python-telegram-bot.org/), environment-based configuration, Docker support, and Railway deployment setup.
+## Recursos
 
-![Telegram Bot Demo](img/bot.png)
+- Recebe mídias enviadas diretamente ou encaminhadas ao chat privado do bot.
+- Copia os tipos de mensagem que a Bot API do Telegram permite copiar, incluindo fotos, vídeos, documentos, áudios, animações, mensagens de voz e stickers.
+- Mantém álbuns de fotos/vídeos/áudios/documentos agrupados.
+- Permite destino em grupo, supergrupo ou canal e tópico opcional em supergrupo com tópicos habilitados.
+- Modos de legenda: preservar, acrescentar, inserir no início ou substituir todas as ocorrências literais.
+- Restringe configuração e cópia ao proprietário identificado por `OWNER_ID`.
+- Persiste as configurações em PostgreSQL.
 
-## Features
+Mensagens protegidas contra encaminhamento, mensagens de serviço e outros tipos que o Telegram não permite copiar não podem ser reproduzidos pela Bot API. Nesses casos o bot informa a falha no chat privado. O bot precisa ter permissão para enviar mensagens no destino; para um canal, adicione-o como administrador com permissão de publicação.
 
-- Persistent chat menu buttons after `/start`
-- `/start`, `/help`, `/about`, and `/ping` commands
-- Anonymous submissions for text, photos, videos, and files with manual approval
-- Periodic standardized message in the publish channel with moderator-adjustable interval (default: 8 hours)
-- Fallback handler for unknown commands
-- Error logging
-- **PostgreSQL persistence** (asyncpg): users and anonymous submissions are stored
-- **Redis integration**: short-lived `/ping` cache
-- Configuration loaded from a local `.env` file or Railway variables
-- Ready to run with Docker and Railway
+## Comandos
 
-## Data Stores
+Use os comandos no chat privado do bot. Apenas o usuário definido por `OWNER_ID` pode configurá-lo.
 
-PostgreSQL and Redis are **optional** for the starter features. When `DATABASE_URL` /
-`REDIS_URL` are set the bot connects on startup; when they are missing, empty, or unreachable
-it logs a warning and keeps running with that backend disabled.
+| Comando | Descrição |
+| --- | --- |
+| `/start` | Mostrar instruções iniciais |
+| `/help` | Listar comandos |
+| `/destino <chat_id\|@username>` | Configurar o grupo, supergrupo ou canal de destino |
+| `/topico <message_thread_id\|off>` | Enviar para um tópico específico ou desativar o tópico |
+| `/id_topico` | No tópico do supergrupo de destino, enviar o ID do tópico ao proprietário no privado |
+| `/caption original` | Preservar a legenda da mensagem |
+| `/caption append <texto>` | Acrescentar o texto após a legenda, separado por uma nova linha |
+| `/caption prepend <texto>` | Inserir o texto antes da legenda, separado por uma nova linha |
+| `/caption replace <buscar> => <substituir>` | Substituir todas as ocorrências literais, diferenciando maiúsculas de minúsculas |
+| `/status` | Mostrar destino, tópico e regra de legenda atuais |
 
-- **PostgreSQL** — `users` and `anonymous_submissions` tables are created automatically on
-  first run. `/start` inserts a new user or refreshes `username`, `first_name`, and `last_seen`
-  for an existing one. Anonymous submissions need this database to store moderation state.
-  Without a database, `/start` still greets the user but the review flow is disabled.
-- **Redis** — `/ping` reports whether the reply came from a 10-second cache (`fresh` vs
-  `cached`). Without Redis, `/ping` replies with a plain `pong`.
-
-Connections are pooled (asyncpg) and reused across updates, then closed cleanly on shutdown.
-
-## Chat Menu Buttons
-
-The bot shows a persistent reply keyboard after `/start` with these buttons:
-
-| Button  | Action                           |
-| ------- | -------------------------------- |
-| `Help`  | Show available commands          |
-| `About` | Show short bot information       |
-| `Ping`  | Check whether the bot is running |
-
-Telegram bots cannot display custom buttons before a user starts or messages the bot. The keyboard appears after the bot replies, then stays available in supported Telegram clients.
-
-## Anonymous Moderation Flow
-
-1. A user sends text, a photo, a video, a file, or a media group to the bot.
-2. The bot sends an anonymous preview to the review chat with Approve / Reject buttons.
-3. On approval, the bot copies the original content into the private channel.
-4. On rejection, the bot marks the submission as rejected and notifies the sender.
-
-Required environment variables for this flow:
-
-- `REVIEW_CHAT_ID` — chat where the reviewer receives pending submissions
-- `PUBLISH_CHANNEL_ID` — private channel that receives approved posts
-
-The bot must be allowed to post in the target channel and to send messages in the review chat.
-
-## Bot Commands
-
-| Command  | Description                      |
-| -------- | -------------------------------- |
-| `/start` | Show the welcome message         |
-| `/help`  | Show available commands          |
-| `/about` | Show short bot information       |
-| `/ping`  | Check whether the bot is running |
-| `/broadcast_set <message>` | Set periodic standardized message (moderator only) |
-| `/broadcast_interval <hours>` | Adjust the interval between periodic broadcasts (moderator only) |
-| `/broadcast_send_now` | Send the configured standardized message immediately (moderator only) |
-| `/broadcast_on` | Enable periodic publishing (moderator only) |
-| `/broadcast_off` | Disable periodic publishing (moderator only) |
-| `/broadcast_status` | Show periodic publishing status (moderator only) |
-| `/cleanup_set <hours>` | Set the maximum message age before channel cleanup removes it (moderator only) |
-| `/cleanup_on` | Enable automatic channel cleanup (moderator only) |
-| `/cleanup_off` | Disable automatic channel cleanup (moderator only) |
-| `/cleanup_status` | Show the cleanup status (moderator only) |
-| `/autoaccept_set <hours>` | Set the interval for automatic approval of pending messages (moderator only) |
-| `/autoaccept_on` | Enable automatic approval outside the nightly window (moderator only) |
-| `/autoaccept_off` | Disable automatic approval (moderator only) |
-| `/autoaccept_status` | Show the automatic approval status (moderator only) |
-
-### Periodic Standardized Message
-
-- The periodic message is sent to `PUBLISH_CHANNEL_ID` when enabled, using a moderator-configurable interval that defaults to 8 hours.
-- Only users listed in `MODERATOR_IDS` can configure or control this flow.
-- Typical setup:
-  1. Configure `MODERATOR_IDS` with comma-separated Telegram user IDs.
-  2. Define the message with `/broadcast_set <message>`.
-  3. Adjust the cadence with `/broadcast_interval <hours>` if needed.
-  4. Use `/broadcast_send_now` to publish it immediately when needed.
-  5. Activate with `/broadcast_on`.
-  6. Check status with `/broadcast_status`.
-
-### Channel Cleanup
-
-- The bot can automatically delete stale messages from `PUBLISH_CHANNEL_ID` when cleanup is enabled.
-- The maximum age is configured with `/cleanup_set <hours>` and defaults to 72 hours (3 days).
-- The cleanup task runs every 5 hours instead of scanning the channel every minute, which keeps it lightweight while still removing stale messages.
-- The first message in the chat is always ignored, and any additional protected message IDs can be listed in `CLEANUP_IGNORED_MESSAGE_IDS` as a comma-separated list, such as `6` to keep `https://t.me/c/4408862765/6`.
-- Typical setup:
-  1. Set `CLEANUP_IGNORED_MESSAGE_IDS` in the environment with any message IDs to preserve.
-  2. Configure the age with `/cleanup_set <hours>`.
-  3. Activate with `/cleanup_on`.
-  4. Check status with `/cleanup_status`.
-
-### Automatic Approval
-
-- Moderators can enable an automatic approval routine that publishes pending anonymous submissions without waiting for a manual click.
-- The approval cycle runs every configured number of hours and skips the nightly window from 22:00 to 08:00.
-- Buttons for Approve / Reject remain available, so the manual veto still works the majority of the time when the auto-approval routine is disabled.
-- Typical setup:
-  1. Configure the interval with `/autoaccept_set <hours>`.
-  2. Enable it with `/autoaccept_on`.
-  3. Check the automation with `/autoaccept_status`.
-
-
-## Project Structure
+Exemplo:
 
 ```text
-.
-├── bot/
-│   ├── __init__.py
-│   ├── cache.py        # Redis client and helpers
-│   ├── config.py
-│   ├── db.py           # PostgreSQL pool and queries
-│   ├── handlers.py
-│   └── main.py
-├── .env
-├── .env.example
-├── .dockerignore
-├── .gitignore
-├── Dockerfile
-├── LICENSE
-├── railway.json
-├── README.md
-└── requirements.txt
+/destino -1001234567890
+/topico 456
+/caption append Confira esta publicação
 ```
 
-## Set Up the Bot Token
+Use `/id_topico` dentro do tópico do supergrupo para receber seu ID no privado; depois configure com `/topico <id>`. Use `/topico off` para publicar no chat sem especificar um tópico. Ao mudar o destino, a configuração anterior do tópico é removida para evitar enviar a um tópico inválido.
 
-1. Create a bot with Telegram `@BotFather`.
-2. Copy the bot token.
-3. Add the token to `.env`:
+O modo `replace` altera somente ocorrências do texto procurado na legenda original; se não houver correspondência, a legenda permanece igual. Para remover uma parte do texto, deixe o lado direito vazio, por exemplo `/caption replace texto antigo =>`. `/caption original` desativa qualquer transformação.
 
-## Environment Variables
+## Configuração local
 
-| Name           | Required | Default | Description                                        |
-| -------------- | -------- | ------- | -------------------------------------------------- |
-| `BOT_TOKEN`    | Yes      | -       | Bot token from `@BotFather`                        |
-| `DATABASE_URL` | No       | -       | PostgreSQL connection string; omit to run without persistence |
-| `REDIS_URL`    | No       | -       | Redis connection string; omit to run without caching          |
-| `REVIEW_CHAT_ID` | No     | -       | Chat ID for manual review of anonymous submissions |
-| `PUBLISH_CHANNEL_ID` | No  | -       | Private channel ID that receives approved content  |
-| `MODERATOR_IDS` | No      | -       | Comma-separated Telegram user IDs allowed to manage periodic broadcasts and cleanup routines |
-| `CLEANUP_IGNORED_MESSAGE_IDS` | No | - | Comma-separated channel message IDs that should never be deleted by the cleanup task |
-| `LOG_LEVEL`    | No       | `INFO`  | Logging level, such as `DEBUG`, `INFO`, or `ERROR` |
+1. Crie um bot com o [@BotFather](https://t.me/BotFather) e obtenha o token.
+2. Descubra seu ID numérico do Telegram para preencher `OWNER_ID`.
+3. Crie um banco PostgreSQL.
+4. Copie `.env.example` para `.env` e preencha as variáveis:
 
-On Railway, add the **PostgreSQL** and **Redis** plugins to your project and reference their
-connection strings from the bot service:
-
-```text
-DATABASE_URL=${{ Postgres.DATABASE_URL }}
-REDIS_URL=${{ Redis.REDIS_URL }}
+```dotenv
+BOT_TOKEN=...
+OWNER_ID=123456789
+DATABASE_URL=postgresql://usuario:senha@localhost:5432/bot
+LOG_LEVEL=INFO
 ```
 
-For local development you can run both with Docker:
-
-```bash
-docker run -d --name pg  -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
-docker run -d --name red -p 6379:6379 redis:7
-```
-
-## Install and Run Locally
-
-Make sure Python 3.10 or newer is installed.
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m bot.main
-```
-
-For Windows PowerShell:
+5. Instale dependências e inicie:
 
 ```powershell
 python -m venv .venv
@@ -194,13 +66,30 @@ pip install -r requirements.txt
 python -m bot.main
 ```
 
-## Run with Docker
+No Linux/macOS, ative o ambiente com `source .venv/bin/activate`.
 
-```bash
-docker build -t telegram-bot .
-docker run --env-file .env telegram-bot
+## Implantação no Railway
+
+O projeto já inclui `Dockerfile` e `railway.json`. Adicione um serviço PostgreSQL ao projeto Railway e configure no serviço do bot:
+
+```text
+BOT_TOKEN=<token do @BotFather>
+OWNER_ID=<ID numérico do proprietário>
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+LOG_LEVEL=INFO
 ```
 
-## License
+Se o serviço PostgreSQL tiver outro nome no Railway, ajuste a referência da variável. O schema de configuração é criado automaticamente no primeiro início.
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+## Observações sobre cópia de mídias
+
+- Ao mudar a legenda de um álbum, o bot reenvia o álbum como um único grupo e altera a legenda do item que a carrega.
+- O Bot API limita álbuns a 2–10 itens e restringe quais tipos podem ser agrupados. Se um álbum ou mensagem não puder ser copiado, o bot apresenta o erro retornado pelo Telegram.
+- O bot copia a mensagem recebida na conversa privada. Encaminhamentos que o Telegram marca como protegidos ou que não disponibilizam a mídia ao bot podem falhar.
+- A legenda substituída é enviada como texto simples; entidades de formatação da legenda original não são reaplicadas quando o texto é modificado por `replace`.
+
+## Testes
+
+```powershell
+python -m unittest discover -s tests
+```

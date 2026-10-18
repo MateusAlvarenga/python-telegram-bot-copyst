@@ -1,0 +1,505 @@
+import asyncio
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Sequence
+
+from telegram import (
+    Chat,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Message,
+    MessageEntity,
+    Update,
+)
+from telegram.error import TelegramError
+from telegram.ext import Application, ContextTypes
+
+from bot.config import BotConfig
+from bot.db import BotSettings, Database
+
+logger = logging.getLogger(__name__)
+ALBUM_WAIT_SECONDS = 0.7
+DESTINATION_USERNAME = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
+
+
+@dataclass
+class AlbumBuffer:
+    messages: list[Message] = field(default_factory=list)
+    task: asyncio.Task[None] | None = None
+
+
+def _settings(context: ContextTypes.DEFAULT_TYPE) -> Database:
+    return context.application.bot_data["database"]
+
+
+def _config(context: ContextTypes.DEFAULT_TYPE) -> BotConfig:
+    return context.application.bot_data["config"]
+
+
+async def _is_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    chat = update.effective_chat
+    if user is None or user.id != _config(context).owner_id or chat is None:
+        return False
+    return chat.type == Chat.PRIVATE
+
+
+async def _reply(update: Update, text: str) -> None:
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text(text)
+
+
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _is_owner(update, context):
+        await _reply(
+            update,
+            "Bot copista pronto. Envie uma mídia ou encaminhe uma mensagem com mídia "
+            "para copiá-la ao destino configurado. Use /help para ver os comandos.",
+        )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    await _reply(
+        update,
+        "Comandos (somente no chat privado do proprietário):\n"
+        "/destino <chat_id|@username> — escolher grupo ou canal de destino\n"
+        "/topico <message_thread_id|off> — definir ou remover o tópico\n"
+        "/caption original — manter a legenda original\n"
+        "/caption append <texto> — acrescentar texto em nova linha\n"
+        "/caption prepend <texto> — inserir texto em nova linha antes da legenda\n"
+        "/caption replace <buscar> => <substituir> — substituir todas as ocorrências "
+        "literais (diferencia maiúsculas de minúsculas)\n"
+        "/status — mostrar configuração atual",
+    )
+
+
+async def destination(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    if len(context.args) != 1:
+        await _reply(update, "Uso: /destino <chat_id|@username>")
+        return
+
+    destination_value = context.args[0]
+    numeric_chat_id = (
+        int(destination_value)
+        if re.fullmatch(r"-?[0-9]{1,20}", destination_value)
+        else None
+    )
+    is_chat_id = (
+        numeric_chat_id is not None
+        and numeric_chat_id != 0
+        and -(2**63) <= numeric_chat_id < 2**63
+    )
+    if not is_chat_id and not DESTINATION_USERNAME.fullmatch(destination_value):
+        await _reply(update, "Informe um chat_id numérico ou @username válido.")
+        return
+
+    try:
+        chat = await context.bot.get_chat(
+            numeric_chat_id if is_chat_id else destination_value
+        )
+    except TelegramError as exc:
+        logger.warning("Could not validate destination %s: %s", destination_value, exc)
+        await _reply(
+            update,
+            "Não consegui acessar esse destino. Verifique o ID/@username e "
+            "se o bot tem acesso ao grupo ou canal.",
+        )
+        return
+
+    if chat.type not in {Chat.GROUP, Chat.SUPERGROUP, Chat.CHANNEL}:
+        await _reply(update, "O destino precisa ser um grupo, supergrupo ou canal.")
+        return
+
+    await _settings(context).set_destination(str(chat.id))
+    await _reply(
+        update,
+        f"Destino configurado: {chat.title or chat.username or chat.id}. "
+        "A configuração anterior de tópico foi removida.",
+    )
+
+
+async def topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    if len(context.args) != 1:
+        await _reply(update, "Uso: /topico <message_thread_id|off>")
+        return
+
+    settings = await _settings(context).get_settings()
+    if settings.destination_chat_id is None:
+        await _reply(update, "Configure primeiro o destino com /destino.")
+        return
+    if context.args[0].lower() == "off":
+        await _settings(context).set_topic(None)
+        await _reply(update, "Envio para tópico específico desativado.")
+        return
+    if not re.fullmatch(r"[0-9]{1,19}", context.args[0]):
+        await _reply(update, "O ID do tópico deve ser um número positivo ou off.")
+        return
+
+    try:
+        chat = await context.bot.get_chat(settings.destination_chat_id)
+    except TelegramError as exc:
+        logger.warning("Could not validate the configured destination: %s", exc)
+        await _reply(update, "Não consegui verificar o destino. Configure-o novamente com /destino.")
+        return
+    if chat.type != Chat.SUPERGROUP or not chat.is_forum:
+        await _reply(update, "O destino precisa ser um supergrupo com tópicos habilitados.")
+        return
+
+    topic_id = int(context.args[0])
+    if topic_id >= 2**63:
+        await _reply(update, "O ID do tópico está fora do intervalo permitido.")
+        return
+    await _settings(context).set_topic(topic_id)
+    await _reply(update, f"Tópico configurado: {topic_id}.")
+
+
+async def current_topic_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.effective_message
+    if (
+        user is None
+        or user.id != _config(context).owner_id
+        or chat is None
+        or chat.type != Chat.SUPERGROUP
+        or message is None
+    ):
+        return
+    if message.message_thread_id is None:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Envie /id_topico dentro do tópico desejado, não na conversa geral.",
+        )
+        return
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=f"ID do tópico atual: {message.message_thread_id}\n"
+        f"Configure-o no privado com /topico {message.message_thread_id}.",
+    )
+
+
+async def caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    message = update.effective_message
+    raw_text = message.text if message is not None else None
+    if not raw_text:
+        await _reply(update, "Uso: /caption original|append|prepend|replace ...")
+        return
+
+    command_parts = raw_text.split(maxsplit=1)
+    if len(command_parts) < 2:
+        await _reply(update, "Uso: /caption original|append|prepend|replace ...")
+        return
+    mode, separator, payload = command_parts[1].partition(" ")
+    mode = mode.lower()
+    payload = payload.lstrip() if separator else ""
+
+    if mode == "original" and not payload:
+        await _settings(context).set_caption("original")
+        await _reply(update, "A legenda original será mantida.")
+        return
+    if mode in {"append", "prepend"} and payload.strip():
+        await _settings(context).set_caption(mode, text=payload.strip())
+        action = "acrescentado ao final" if mode == "append" else "inserido no início"
+        await _reply(update, f"Texto da legenda configurado para ser {action}.")
+        return
+    if mode == "replace" and "=>" in payload:
+        search, replacement = payload.split("=>", maxsplit=1)
+        search = search.strip()
+        replacement = replacement.strip()
+        if search:
+            await _settings(context).set_caption(
+                "replace",
+                search=search,
+                replacement=replacement,
+            )
+            await _reply(update, "Substituição de legenda configurada.")
+            return
+
+    await _reply(
+        update,
+        "Uso: /caption original | /caption append <texto> | /caption prepend <texto> | "
+        "/caption replace <buscar> => <substituir>",
+    )
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    settings = await _settings(context).get_settings()
+    destination_value = settings.destination_chat_id or "não configurado"
+    topic_value = str(settings.topic_id) if settings.topic_id is not None else "nenhum"
+    if settings.caption_mode == "original":
+        caption_value = "manter legenda original"
+    elif settings.caption_mode in {"append", "prepend"}:
+        caption_value = f"{settings.caption_mode}: {settings.caption_text}"
+    else:
+        caption_value = (
+            f"replace: {settings.caption_search!r} => {settings.caption_replacement!r}"
+        )
+    await _reply(
+        update,
+        f"Destino: {destination_value}\nTópico: {topic_value}\nLegenda: {caption_value}",
+    )
+
+
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def transform_caption(
+    caption_text: str | None,
+    entities: Sequence[MessageEntity] | None,
+    settings: BotSettings,
+) -> tuple[str | None, list[MessageEntity] | None, bool]:
+    if settings.caption_mode == "original":
+        return caption_text, list(entities) if entities else None, False
+    if settings.caption_mode in {"append", "prepend"}:
+        addition = settings.caption_text or ""
+        original = caption_text or ""
+        separator = "\n" if original and addition else ""
+        if settings.caption_mode == "append":
+            transformed = f"{original}{separator}{addition}"
+            adjusted_entities = list(entities) if entities else None
+        else:
+            prefix = f"{addition}{separator}"
+            transformed = f"{prefix}{original}"
+            adjusted_entities = list(entities) if entities else None
+            if adjusted_entities is not None:
+                shift = _utf16_length(prefix)
+                adjusted_entities = [
+                    MessageEntity.de_json(
+                        {**entity.to_dict(), "offset": entity.offset + shift},
+                        bot=None,
+                    )
+                    for entity in adjusted_entities
+                ]
+        return transformed, adjusted_entities, True
+    if settings.caption_mode == "replace":
+        search = settings.caption_search or ""
+        if not caption_text or not search:
+            return caption_text, list(entities) if entities else None, False
+        transformed = caption_text.replace(search, settings.caption_replacement or "")
+        if transformed == caption_text:
+            return caption_text, list(entities) if entities else None, False
+        return transformed, None, True
+    raise ValueError(f"Unsupported caption mode: {settings.caption_mode}")
+
+
+def _can_have_caption(message: Message) -> bool:
+    return message.caption is not None or any(
+        getattr(message, field_name, None) is not None
+        for field_name in ("animation", "audio", "document", "photo", "video", "voice")
+    )
+
+
+def _has_media(message: Message) -> bool:
+    return message.effective_attachment is not None
+
+
+def _media_input(
+    message: Message,
+    settings: BotSettings,
+    transform: bool,
+) -> InputMediaAudio | InputMediaDocument | InputMediaPhoto | InputMediaVideo:
+    caption_text = message.caption
+    caption_entities = message.caption_entities
+    should_override = False
+    if transform:
+        caption_text, caption_entities, should_override = transform_caption(
+            caption_text,
+            caption_entities,
+            settings,
+        )
+    caption_options: dict[str, object] = {}
+    if caption_text is not None or should_override:
+        caption_options = {
+            "caption": caption_text,
+            "caption_entities": caption_entities,
+            "parse_mode": None,
+        }
+
+    if message.photo:
+        return InputMediaPhoto(
+            message.photo[-1].file_id,
+            has_spoiler=message.has_media_spoiler,
+            show_caption_above_media=message.show_caption_above_media,
+            **caption_options,
+        )
+    if message.video is not None:
+        return InputMediaVideo(
+            message.video.file_id,
+            width=message.video.width,
+            height=message.video.height,
+            duration=message.video.duration,
+            supports_streaming=message.video.supports_streaming,
+            has_spoiler=message.has_media_spoiler,
+            show_caption_above_media=message.show_caption_above_media,
+            **caption_options,
+        )
+    if message.audio is not None:
+        return InputMediaAudio(
+            message.audio.file_id,
+            duration=message.audio.duration,
+            performer=message.audio.performer,
+            title=message.audio.title,
+            **caption_options,
+        )
+    if message.document is not None:
+        return InputMediaDocument(
+            message.document.file_id,
+            filename=message.document.file_name,
+            **caption_options,
+        )
+    raise ValueError("Este tipo de mídia não pode ser incluído em um álbum.")
+
+
+async def _copy_single(
+    message: Message,
+    settings: BotSettings,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    kwargs: dict[str, object] = {}
+    if _can_have_caption(message):
+        transformed, entities, should_override = transform_caption(
+            message.caption,
+            message.caption_entities,
+            settings,
+        )
+        if should_override:
+            kwargs["caption"] = transformed
+            kwargs["caption_entities"] = entities
+            kwargs["parse_mode"] = None
+    await context.bot.copy_message(
+        chat_id=settings.destination_chat_id,
+        from_chat_id=message.chat_id,
+        message_id=message.message_id,
+        message_thread_id=settings.topic_id,
+        **kwargs,
+    )
+
+
+async def _copy_album(
+    messages: list[Message],
+    settings: BotSettings,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    messages.sort(key=lambda item: item.message_id)
+    if len(messages) == 1:
+        await _copy_single(messages[0], settings, context)
+        return
+    if len(messages) > 10:
+        raise ValueError("O álbum excede o limite de 10 mídias da Bot API.")
+
+    caption_index = next(
+        (index for index, message in enumerate(messages) if message.caption is not None),
+        None,
+    )
+    if caption_index is None and settings.caption_mode in {"append", "prepend"}:
+        caption_index = 0
+    media = [
+        _media_input(message, settings, transform=(index == caption_index))
+        for index, message in enumerate(messages)
+    ]
+    await context.bot.send_media_group(
+        chat_id=settings.destination_chat_id,
+        media=media,
+        message_thread_id=settings.topic_id,
+    )
+
+
+async def _deliver_messages(
+    messages: list[Message],
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not messages:
+        return
+    settings = await _settings(context).get_settings()
+    source = messages[0]
+    if settings.destination_chat_id is None:
+        await source.reply_text("Nenhum destino configurado. Defina-o com /destino <chat_id|@username>.")
+        return
+
+    try:
+        if len(messages) > 1:
+            await _copy_album(messages, settings, context)
+        else:
+            await _copy_single(source, settings, context)
+    except (TelegramError, ValueError) as exc:
+        logger.warning("Could not copy message(s) to %s: %s", settings.destination_chat_id, exc)
+        await source.reply_text(f"Não foi possível copiar a mídia: {exc}")
+        return
+    await source.reply_text("Mídia copiada.")
+
+
+async def _flush_album_after_delay(
+    key: tuple[int, str],
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    try:
+        await asyncio.sleep(ALBUM_WAIT_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    lock: asyncio.Lock = context.application.bot_data["album_lock"]
+    async with lock:
+        pending: dict[tuple[int, str], AlbumBuffer] = context.application.bot_data["albums"]
+        album = pending.pop(key, None)
+    if album is not None:
+        context.application.create_task(
+            _deliver_messages(album.messages, context),
+            update=Update(update_id=0, message=album.messages[0]),
+        )
+
+
+async def _queue_album(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    key = (message.chat_id, message.media_group_id or "")
+    lock: asyncio.Lock = context.application.bot_data["album_lock"]
+    async with lock:
+        pending: dict[tuple[int, str], AlbumBuffer] = context.application.bot_data["albums"]
+        album = pending.get(key)
+        if album is None:
+            album = AlbumBuffer()
+            pending[key] = album
+        elif album.task is not None:
+            album.task.cancel()
+        album.messages.append(message)
+        album.task = asyncio.create_task(_flush_album_after_delay(key, context))
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    message = update.effective_message
+    if message is None:
+        return
+    if message.media_group_id:
+        await _queue_album(message, context)
+        return
+    if not _has_media(message):
+        await _reply(update, "Envie uma mídia compatível ou encaminhe uma mensagem com mídia.")
+        return
+    await _deliver_messages([message], context)
+
+
+async def stop_album_buffers(application: Application) -> None:
+    pending: dict[tuple[int, str], AlbumBuffer] = application.bot_data.get("albums", {})
+    tasks = [album.task for album in pending.values() if album.task is not None]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
