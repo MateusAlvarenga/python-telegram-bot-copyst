@@ -18,7 +18,14 @@ from telegram import (
 
 from bot.config import BotConfig
 from bot.db import BotSettings, Database, _asyncpg_dsn
-from bot.handlers import _copy_album, _is_owner, _media_input, caption, transform_caption
+from bot.handlers import (
+    _copy_album,
+    _is_owner,
+    _media_input,
+    about,
+    caption,
+    transform_caption,
+)
 from bot.main import OWNER_COMMANDS, register_owner_commands
 
 
@@ -354,6 +361,27 @@ class OwnerAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _is_owner(private_owner, context))
         self.assertFalse(await _is_owner(other_user, context))
         self.assertFalse(await _is_owner(owner_in_group, context))
+
+
+class StartCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_owner_receives_group_invitation(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=User(id=456, is_bot=False, first_name="user"),
+            effective_chat=Chat(id=456, type=Chat.PRIVATE),
+            effective_message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "config": BotConfig("token", 123, "postgresql://localhost/db", 20),
+                },
+            ),
+        )
+
+        await about(update, context)
+
+        reply_text.assert_awaited_once_with("Vem pro grupo ver mais: t.me/pra_bater")
 
 
 class OwnerCommandMenuTests(unittest.IsolatedAsyncioTestCase):

@@ -60,6 +60,8 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Bot copista pronto. Envie uma mídia ou encaminhe uma mensagem com mídia "
             "para copiá-la ao destino configurado. Use /help para ver os comandos.",
         )
+    else:
+        await _reply(update, "Vem pro grupo ver mais: t.me/pra_bater")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
