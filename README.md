@@ -33,7 +33,8 @@ Ao iniciar, o bot registra esses comandos no menu do Telegram para o chat privad
 | `/caption original` | Preservar a legenda da mensagem |
 | `/caption append <texto>` | Acrescentar o texto após a legenda, separado por uma nova linha |
 | `/caption prepend <texto>` | Inserir o texto antes da legenda, separado por uma nova linha |
-| `/caption replace <buscar> => <substituir>` | Substituir todas as ocorrências literais, diferenciando maiúsculas de minúsculas |
+| `/caption replace_parcial <buscar> => <substituir>` | Substituir todas as ocorrências literais, diferenciando maiúsculas de minúsculas |
+| `/caption replace_total <texto>` | Substituir toda a legenda pelo texto informado |
 | `/status` | Mostrar destino, tópico e regra de legenda atuais |
 
 Exemplo:
@@ -46,7 +47,7 @@ Exemplo:
 
 Use `/id_topico` dentro do tópico do supergrupo para receber seu ID no privado; depois configure com `/topico <id>`. Use `/topico off` para publicar no chat sem especificar um tópico. Ao mudar o destino, a configuração anterior do tópico é removida para evitar enviar a um tópico inválido.
 
-O modo `replace` altera somente ocorrências do texto procurado na legenda original; se não houver correspondência, a legenda permanece igual. Para remover uma parte do texto, deixe o lado direito vazio, por exemplo `/caption replace texto antigo =>`. `/caption original` desativa qualquer transformação.
+O modo `replace_parcial` altera somente ocorrências do texto procurado na legenda original; se não houver correspondência, a legenda permanece igual. Para remover uma parte do texto, deixe o lado direito vazio, por exemplo `/caption replace_parcial texto antigo =>`. O modo `replace_total` substitui a legenda inteira pelo texto informado, mesmo quando a mídia ainda não tem legenda. `/caption original` desativa qualquer transformação.
 
 ## Configuração local
 
@@ -91,7 +92,7 @@ Se o serviço PostgreSQL tiver outro nome no Railway, ajuste a referência da va
 - Ao mudar a legenda de um álbum, o bot reenvia o álbum como um único grupo e altera a legenda do item que a carrega.
 - O Bot API limita álbuns a 2–10 itens e restringe quais tipos podem ser agrupados. Se um álbum ou mensagem não puder ser copiado, o bot apresenta o erro retornado pelo Telegram.
 - O bot copia a mensagem recebida na conversa privada. Encaminhamentos que o Telegram marca como protegidos ou que não disponibilizam a mídia ao bot podem falhar.
-- A legenda substituída é enviada como texto simples; entidades de formatação da legenda original não são reaplicadas quando o texto é modificado por `replace`.
+- As legendas alteradas por `replace_parcial` ou `replace_total` são enviadas como texto simples; entidades de formatação da legenda original não são reaplicadas.
 
 ## Testes
 

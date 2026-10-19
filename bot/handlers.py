@@ -73,8 +73,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/caption original — manter a legenda original\n"
         "/caption append <texto> — acrescentar texto em nova linha\n"
         "/caption prepend <texto> — inserir texto em nova linha antes da legenda\n"
-        "/caption replace <buscar> => <substituir> — substituir todas as ocorrências "
+        "/caption replace_parcial <buscar> => <substituir> — substituir todas as ocorrências "
         "literais (diferencia maiúsculas de minúsculas)\n"
+        "/caption replace_total <texto> — substituir toda a legenda\n"
         "/status — mostrar configuração atual",
     )
 
@@ -194,12 +195,18 @@ async def caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     raw_text = message.text if message is not None else None
     if not raw_text:
-        await _reply(update, "Uso: /caption original|append|prepend|replace ...")
+        await _reply(
+            update,
+            "Uso: /caption original|append|prepend|replace_parcial|replace_total ...",
+        )
         return
 
     command_parts = raw_text.split(maxsplit=1)
     if len(command_parts) < 2:
-        await _reply(update, "Uso: /caption original|append|prepend|replace ...")
+        await _reply(
+            update,
+            "Uso: /caption original|append|prepend|replace_parcial|replace_total ...",
+        )
         return
     mode, separator, payload = command_parts[1].partition(" ")
     mode = mode.lower()
@@ -214,13 +221,17 @@ async def caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         action = "acrescentado ao final" if mode == "append" else "inserido no início"
         await _reply(update, f"Texto da legenda configurado para ser {action}.")
         return
-    if mode == "replace" and "=>" in payload:
+    if mode == "replace_total" and payload.strip():
+        await _settings(context).set_caption("replace_total", text=payload.strip())
+        await _reply(update, "A legenda será totalmente substituída.")
+        return
+    if mode == "replace_parcial" and "=>" in payload:
         search, replacement = payload.split("=>", maxsplit=1)
         search = search.strip()
         replacement = replacement.strip()
         if search:
             await _settings(context).set_caption(
-                "replace",
+                "replace_parcial",
                 search=search,
                 replacement=replacement,
             )
@@ -230,7 +241,8 @@ async def caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(
         update,
         "Uso: /caption original | /caption append <texto> | /caption prepend <texto> | "
-        "/caption replace <buscar> => <substituir>",
+        "/caption replace_parcial <buscar> => <substituir> | "
+        "/caption replace_total <texto>",
     )
 
 
@@ -244,10 +256,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         caption_value = "manter legenda original"
     elif settings.caption_mode in {"append", "prepend"}:
         caption_value = f"{settings.caption_mode}: {settings.caption_text}"
-    else:
+    elif settings.caption_mode == "replace_parcial":
         caption_value = (
-            f"replace: {settings.caption_search!r} => {settings.caption_replacement!r}"
+            f"replace_parcial: {settings.caption_search!r} "
+            f"=> {settings.caption_replacement!r}"
         )
+    else:
+        caption_value = f"replace_total: {settings.caption_text}"
     await _reply(
         update,
         f"Destino: {destination_value}\nTópico: {topic_value}\nLegenda: {caption_value}",
@@ -286,7 +301,7 @@ def transform_caption(
                     for entity in adjusted_entities
                 ]
         return transformed, adjusted_entities, True
-    if settings.caption_mode == "replace":
+    if settings.caption_mode == "replace_parcial":
         search = settings.caption_search or ""
         if not caption_text or not search:
             return caption_text, list(entities) if entities else None, False
@@ -294,6 +309,8 @@ def transform_caption(
         if transformed == caption_text:
             return caption_text, list(entities) if entities else None, False
         return transformed, None, True
+    if settings.caption_mode == "replace_total":
+        return settings.caption_text or "", None, True
     raise ValueError(f"Unsupported caption mode: {settings.caption_mode}")
 
 
@@ -343,7 +360,6 @@ def _media_input(
             width=message.video.width,
             height=message.video.height,
             duration=message.video.duration,
-            supports_streaming=message.video.supports_streaming,
             has_spoiler=message.has_media_spoiler,
             show_caption_above_media=message.show_caption_above_media,
             **caption_options,
@@ -406,7 +422,11 @@ async def _copy_album(
         (index for index, message in enumerate(messages) if message.caption is not None),
         None,
     )
-    if caption_index is None and settings.caption_mode in {"append", "prepend"}:
+    if caption_index is None and settings.caption_mode in {
+        "append",
+        "prepend",
+        "replace_total",
+    }:
         caption_index = 0
     media = [
         _media_input(message, settings, transform=(index == caption_index))

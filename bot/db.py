@@ -49,12 +49,31 @@ class Database:
                     destination_chat_id TEXT,
                     topic_id BIGINT,
                     caption_mode TEXT NOT NULL DEFAULT 'original'
-                        CHECK (caption_mode IN ('original', 'append', 'prepend', 'replace')),
+                        CONSTRAINT bot_settings_caption_mode_check
+                        CHECK (caption_mode IN (
+                            'original', 'append', 'prepend',
+                            'replace_parcial', 'replace_total'
+                        )),
                     caption_text TEXT,
                     caption_search TEXT,
                     caption_replacement TEXT,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+                """
+            )
+            await connection.execute(
+                """
+                ALTER TABLE bot_settings
+                    DROP CONSTRAINT IF EXISTS bot_settings_caption_mode_check;
+                UPDATE bot_settings
+                SET caption_mode = 'replace_parcial'
+                WHERE caption_mode = 'replace';
+                ALTER TABLE bot_settings
+                    ADD CONSTRAINT bot_settings_caption_mode_check
+                    CHECK (caption_mode IN (
+                        'original', 'append', 'prepend',
+                        'replace_parcial', 'replace_total'
+                    ));
                 """
             )
             await connection.execute(
