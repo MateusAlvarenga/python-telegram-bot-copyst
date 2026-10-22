@@ -6,7 +6,7 @@
 
 Bot privado que copia mensagens com mídias para um grupo, supergrupo ou canal configurado. O proprietário pode escolher um tópico de fórum e uma regra persistente para as legendas. A configuração fica no PostgreSQL, então continua disponível após reinicializações no Railway.
 
-## Recursos
+## Recursoss
 
 - Recebe mídias enviadas diretamente ou encaminhadas ao chat privado do bot.
 - Copia os tipos de mensagem que a Bot API do Telegram permite copiar, incluindo fotos, vídeos, documentos, áudios, animações, mensagens de voz e stickers.
