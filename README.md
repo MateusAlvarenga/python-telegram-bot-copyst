@@ -91,6 +91,9 @@ Se o serviço PostgreSQL tiver outro nome no Railway, ajuste a referência da va
 
 - Ao mudar a legenda de um álbum, o bot reenvia o álbum como um único grupo e altera a legenda do item que a carrega.
 - O Bot API limita álbuns a 2–10 itens e restringe quais tipos podem ser agrupados. Se um álbum ou mensagem não puder ser copiado, o bot apresenta o erro retornado pelo Telegram.
+- Mensagens e álbuns são entregues em uma fila FIFO para evitar rajadas de cópias. Quando o Telegram responde com `RetryAfter`, o bot aguarda o intervalo indicado antes de tentar novamente. Timeouts de rede são tentados até cinco vezes, com espera crescente; se o Telegram concluir uma cópia mas a resposta se perder, uma tentativa pode gerar duplicata.
+- A fila existe apenas em memória. Mensagens que ainda estiverem aguardando envio podem ser perdidas se o processo reiniciar ou encerrar.
+- Os timeouts HTTP de polling e de chamadas ao Bot API são maiores que os padrões; uploads de mídia também têm um limite de escrita ampliado.
 - O bot copia a mensagem recebida na conversa privada. Encaminhamentos que o Telegram marca como protegidos ou que não disponibilizam a mídia ao bot podem falhar.
 - As legendas alteradas por `replace_parcial` ou `replace_total` são enviadas como texto simples; entidades de formatação da legenda original não são reaplicadas.
 

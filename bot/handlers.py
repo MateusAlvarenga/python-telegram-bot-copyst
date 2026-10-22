@@ -1,8 +1,10 @@
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Sequence
+from datetime import timedelta
+from typing import Sequence, TypeVar
 
 from telegram import (
     Chat,
@@ -14,7 +16,7 @@ from telegram import (
     MessageEntity,
     Update,
 )
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application, ContextTypes
 
 from bot.config import BotConfig
@@ -22,12 +24,21 @@ from bot.db import BotSettings, Database
 
 logger = logging.getLogger(__name__)
 ALBUM_WAIT_SECONDS = 0.7
+MAX_TIMEOUT_ATTEMPTS = 5
 DESTINATION_USERNAME = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
+T = TypeVar("T")
+
+
+@dataclass
+class DeliveryJob:
+    messages: list[Message]
+    context: ContextTypes.DEFAULT_TYPE
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
 class AlbumBuffer:
-    messages: list[Message] = field(default_factory=list)
+    job: DeliveryJob
     task: asyncio.Task[None] | None = None
 
 
@@ -441,28 +452,106 @@ async def _copy_album(
     )
 
 
-async def _deliver_messages(
-    messages: list[Message],
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+async def _call_with_retries(operation: Callable[[], Awaitable[T]]) -> T:
+    timeout_attempts = 0
+    while True:
+        try:
+            return await operation()
+        except RetryAfter as exc:
+            delay = (
+                exc.retry_after.total_seconds()
+                if isinstance(exc.retry_after, timedelta)
+                else float(exc.retry_after)
+            )
+            logger.info("Telegram rate limit reached; retrying in %.2f seconds.", delay)
+            await asyncio.sleep(delay)
+        except TimedOut:
+            timeout_attempts += 1
+            if timeout_attempts >= MAX_TIMEOUT_ATTEMPTS:
+                raise
+            delay = min(2 ** (timeout_attempts - 1), 30)
+            logger.warning(
+                "Telegram request timed out; retrying in %s seconds (attempt %s/%s).",
+                delay,
+                timeout_attempts + 1,
+                MAX_TIMEOUT_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+
+
+async def _notify_delivery_failure(message: Message, error: Exception) -> None:
+    try:
+        await _call_with_retries(
+            lambda: message.reply_text(f"Não foi possível copiar a mídia: {error}")
+        )
+    except TelegramError:
+        logger.exception("Could not notify the owner about a failed delivery.")
+
+
+async def _deliver_messages(job: DeliveryJob) -> None:
+    messages = job.messages
+    context = job.context
     if not messages:
         return
     settings = await _settings(context).get_settings()
     source = messages[0]
     if settings.destination_chat_id is None:
-        await source.reply_text("Nenhum destino configurado. Defina-o com /destino <chat_id|@username>.")
+        await _call_with_retries(
+            lambda: source.reply_text(
+                "Nenhum destino configurado. Defina-o com /destino <chat_id|@username>."
+            )
+        )
         return
 
     try:
         if len(messages) > 1:
-            await _copy_album(messages, settings, context)
+            await _call_with_retries(
+                lambda: _copy_album(messages, settings, context)
+            )
         else:
-            await _copy_single(source, settings, context)
+            await _call_with_retries(
+                lambda: _copy_single(source, settings, context)
+            )
     except (TelegramError, ValueError) as exc:
         logger.warning("Could not copy message(s) to %s: %s", settings.destination_chat_id, exc)
-        await source.reply_text(f"Não foi possível copiar a mídia: {exc}")
+        await _notify_delivery_failure(source, exc)
         return
-    await source.reply_text("Mídia copiada.")
+    try:
+        await _call_with_retries(lambda: source.reply_text("Mídia copiada."))
+    except TelegramError:
+        logger.exception("Media was copied but its confirmation could not be sent.")
+
+
+async def _delivery_worker(application: Application) -> None:
+    queue: asyncio.Queue[DeliveryJob] = application.bot_data["delivery_queue"]
+    while True:
+        job = await queue.get()
+        try:
+            await job.ready.wait()
+            await _deliver_messages(job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            message = job.messages[0] if job.messages else None
+            logger.exception("Unexpected error processing queued Telegram delivery.")
+            if message is not None:
+                await _notify_delivery_failure(message, exc)
+        finally:
+            queue.task_done()
+
+
+def _enqueue_delivery(
+    messages: list[Message],
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    wait_until_ready: bool = False,
+) -> DeliveryJob:
+    job = DeliveryJob(messages=messages, context=context)
+    if not wait_until_ready:
+        job.ready.set()
+    queue: asyncio.Queue[DeliveryJob] = context.application.bot_data["delivery_queue"]
+    queue.put_nowait(job)
+    return job
 
 
 async def _flush_album_after_delay(
@@ -479,10 +568,7 @@ async def _flush_album_after_delay(
         pending: dict[tuple[int, str], AlbumBuffer] = context.application.bot_data["albums"]
         album = pending.pop(key, None)
     if album is not None:
-        context.application.create_task(
-            _deliver_messages(album.messages, context),
-            update=Update(update_id=0, message=album.messages[0]),
-        )
+        album.job.ready.set()
 
 
 async def _queue_album(
@@ -495,11 +581,12 @@ async def _queue_album(
         pending: dict[tuple[int, str], AlbumBuffer] = context.application.bot_data["albums"]
         album = pending.get(key)
         if album is None:
-            album = AlbumBuffer()
+            job = _enqueue_delivery([], context, wait_until_ready=True)
+            album = AlbumBuffer(job=job)
             pending[key] = album
         elif album.task is not None:
             album.task.cancel()
-        album.messages.append(message)
+        album.job.messages.append(message)
         album.task = asyncio.create_task(_flush_album_after_delay(key, context))
 
 
@@ -515,7 +602,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not _has_media(message):
         await _reply(update, "Envie uma mídia compatível ou encaminhe uma mensagem com mídia.")
         return
-    await _deliver_messages([message], context)
+    _enqueue_delivery([message], context)
 
 
 async def stop_album_buffers(application: Application) -> None:
@@ -525,3 +612,7 @@ async def stop_album_buffers(application: Application) -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+    worker: asyncio.Task[None] | None = application.bot_data.get("delivery_worker")
+    if worker is not None:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)

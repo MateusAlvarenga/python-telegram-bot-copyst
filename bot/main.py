@@ -10,10 +10,12 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from bot.config import BotConfig, load_config
 from bot.db import Database
 from bot.handlers import (
+    _delivery_worker,
     about,
     caption,
     current_topic_id,
@@ -37,6 +39,10 @@ OWNER_COMMANDS = (
     BotCommand("status", "Ver a configuração atual"),
 )
 
+BOT_API_TIMEOUT_SECONDS = 30
+MEDIA_WRITE_TIMEOUT_SECONDS = 60
+POLLING_READ_TIMEOUT_SECONDS = 40
+
 
 async def register_owner_commands(bot: Bot, owner_id: int) -> None:
     await bot.set_my_commands(
@@ -51,6 +57,10 @@ async def _post_init(application: Application) -> None:
     application.bot_data["database"] = database
     logger.info("PostgreSQL connection is ready.")
     await register_owner_commands(application.bot, config.owner_id)
+    application.bot_data["delivery_worker"] = asyncio.create_task(
+        _delivery_worker(application),
+        name="telegram-delivery-worker",
+    )
     logger.info("Telegram command menu registered for owner %s.", config.owner_id)
 
 
@@ -89,9 +99,26 @@ async def _log_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None
 
 def create_application(config: BotConfig | None = None) -> Application:
     config = config or load_config()
+    bot_api_request = HTTPXRequest(
+        connection_pool_size=4,
+        connect_timeout=10,
+        read_timeout=BOT_API_TIMEOUT_SECONDS,
+        write_timeout=BOT_API_TIMEOUT_SECONDS,
+        pool_timeout=10,
+        media_write_timeout=MEDIA_WRITE_TIMEOUT_SECONDS,
+    )
+    polling_request = HTTPXRequest(
+        connection_pool_size=1,
+        connect_timeout=10,
+        read_timeout=POLLING_READ_TIMEOUT_SECONDS,
+        write_timeout=10,
+        pool_timeout=10,
+    )
     application = (
         ApplicationBuilder()
         .token(config.bot_token)
+        .request(bot_api_request)
+        .get_updates_request(polling_request)
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
@@ -99,6 +126,7 @@ def create_application(config: BotConfig | None = None) -> Application:
     application.bot_data["config"] = config
     application.bot_data["albums"] = {}
     application.bot_data["album_lock"] = asyncio.Lock()
+    application.bot_data["delivery_queue"] = asyncio.Queue()
     application.add_handler(CommandHandler("start", about))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("destino", destination))

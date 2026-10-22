@@ -1,8 +1,9 @@
+import asyncio
 import unittest
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, call, patch
 
 from telegram import (
     BotCommandScopeChat,
@@ -15,18 +16,31 @@ from telegram import (
     User,
     Video,
 )
+from telegram.error import RetryAfter, TimedOut
 
 from bot.config import BotConfig
 from bot.db import BotSettings, Database, _asyncpg_dsn
 from bot.handlers import (
+    DeliveryJob,
+    MAX_TIMEOUT_ATTEMPTS,
+    _call_with_retries,
     _copy_album,
+    _delivery_worker,
+    _enqueue_delivery,
     _is_owner,
     _media_input,
     about,
     caption,
     transform_caption,
 )
-from bot.main import OWNER_COMMANDS, register_owner_commands
+from bot.main import (
+    BOT_API_TIMEOUT_SECONDS,
+    MEDIA_WRITE_TIMEOUT_SECONDS,
+    OWNER_COMMANDS,
+    POLLING_READ_TIMEOUT_SECONDS,
+    create_application,
+    register_owner_commands,
+)
 
 
 class CaptionTransformationTests(unittest.TestCase):
@@ -331,6 +345,75 @@ class AlbumCaptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(media[1].caption)
 
 
+class DeliveryRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_waits_for_retry_after_before_repeating_operation(self) -> None:
+        operation = AsyncMock(side_effect=[RetryAfter(3), "sent"])
+
+        with patch("bot.handlers.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await _call_with_retries(operation)
+
+        self.assertEqual(result, "sent")
+        self.assertEqual(operation.await_count, 2)
+        sleep.assert_awaited_once_with(3.0)
+
+    async def test_retries_timeouts_with_exponential_backoff(self) -> None:
+        operation = AsyncMock(
+            side_effect=[TimedOut("network timeout"), TimedOut("network timeout"), "sent"]
+        )
+
+        with patch("bot.handlers.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await _call_with_retries(operation)
+
+        self.assertEqual(result, "sent")
+        self.assertEqual(operation.await_count, 3)
+        self.assertEqual(sleep.await_args_list, [call(1), call(2)])
+
+    async def test_stops_after_five_timeout_attempts(self) -> None:
+        operation = AsyncMock(side_effect=TimedOut("network timeout"))
+
+        with (
+            patch("bot.handlers.asyncio.sleep", new_callable=AsyncMock) as sleep,
+            self.assertRaises(TimedOut),
+        ):
+            await _call_with_retries(operation)
+
+        self.assertEqual(operation.await_count, MAX_TIMEOUT_ATTEMPTS)
+        self.assertEqual(sleep.await_args_list, [call(1), call(2), call(4), call(8)])
+
+
+class DeliveryQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_album_placeholder_preserves_fifo_order_for_following_messages(self) -> None:
+        queue: asyncio.Queue[DeliveryJob] = asyncio.Queue()
+        context = SimpleNamespace(
+            application=SimpleNamespace(bot_data={"delivery_queue": queue}),
+        )
+        album_message = SimpleNamespace(message_id=1)
+        following_message = SimpleNamespace(message_id=2)
+        album_job = _enqueue_delivery([], context, wait_until_ready=True)
+        _enqueue_delivery([following_message], context)
+        delivered: list[int] = []
+
+        async def record_delivery(job: DeliveryJob) -> None:
+            delivered.append(job.messages[0].message_id)
+
+        with patch("bot.handlers._deliver_messages", side_effect=record_delivery):
+            worker = asyncio.create_task(
+                _delivery_worker(context.application),
+            )
+            try:
+                await asyncio.sleep(0)
+                self.assertEqual(delivered, [])
+                album_job.messages.append(album_message)
+                album_job.ready.set()
+                await asyncio.wait_for(queue.join(), timeout=1)
+            finally:
+                worker.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await worker
+
+        self.assertEqual(delivered, [1, 2])
+
+
 class OwnerAccessTests(unittest.IsolatedAsyncioTestCase):
     async def test_only_owner_in_private_chat_is_authorized(self) -> None:
         owner = User(id=123, is_bot=False, first_name="owner")
@@ -385,6 +468,29 @@ class StartCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OwnerCommandMenuTests(unittest.IsolatedAsyncioTestCase):
+    async def test_application_configures_timeouts_for_polling_and_bot_api(self) -> None:
+        application = create_application(
+            BotConfig("123456:TEST", 123, "postgresql://localhost/db", 20),
+        )
+        polling_request, bot_api_request = application.bot._request
+        try:
+            self.assertEqual(
+                polling_request._client.timeout.read,
+                POLLING_READ_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(
+                bot_api_request._client.timeout.read,
+                BOT_API_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(
+                bot_api_request._media_write_timeout,
+                MEDIA_WRITE_TIMEOUT_SECONDS,
+            )
+            self.assertIn("delivery_queue", application.bot_data)
+        finally:
+            for request in application.bot._request:
+                await request.shutdown()
+
     async def test_registers_commands_only_in_owner_private_chat_scope(self) -> None:
         bot = SimpleNamespace(set_my_commands=AsyncMock())
 
