@@ -14,7 +14,7 @@ Bot privado que copia mensagens com mídias para um grupo, supergrupo ou canal c
 - Permite destino em grupo, supergrupo ou canal e tópico opcional em supergrupo com tópicos habilitados.
 - Modos de legenda: preservar, acrescentar, inserir no início ou substituir todas as ocorrências literais.
 - Restringe configuração e cópia ao proprietário identificado por `OWNER_ID`.
-- Persiste as configurações em PostgreSQL.
+- Persiste as configurações em PostgreSQL..
 
 Mensagens protegidas contra encaminhamento, mensagens de serviço e outros tipos que o Telegram não permite copiar não podem ser reproduzidos pela Bot API. Nesses casos o bot informa a falha no chat privado. O bot precisa ter permissão para enviar mensagens no destino; para um canal, adicione-o como administrador com permissão de publicação.
 
