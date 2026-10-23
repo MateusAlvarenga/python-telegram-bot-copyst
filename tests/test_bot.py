@@ -17,6 +17,7 @@ from telegram import (
     Video,
 )
 from telegram.error import RetryAfter, TimedOut
+from telegram.ext import CommandHandler
 
 from bot.config import BotConfig
 from bot.db import BotSettings, Database, _asyncpg_dsn
@@ -31,6 +32,9 @@ from bot.handlers import (
     _media_input,
     about,
     caption,
+    list_destination_aliases,
+    load_destination_alias,
+    save_destination_alias,
     transform_caption,
 )
 from bot.main import (
@@ -200,12 +204,16 @@ class DatabaseUrlTests(unittest.TestCase):
 class FakeConnection:
     def __init__(self) -> None:
         self.executions: list[tuple[str, tuple[object, ...]]] = []
+        self.fetches: list[tuple[str, tuple[object, ...]]] = []
+        self.alias_row: dict[str, object] | None = None
 
     async def execute(self, query: str, *args: object) -> str:
         self.executions.append((query, args))
         return "OK"
 
-    async def fetchrow(self, query: str) -> dict[str, object]:
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        if "FROM destination_aliases" in query:
+            return self.alias_row
         return {
             "destination_chat_id": "-100123",
             "topic_id": 45,
@@ -214,6 +222,21 @@ class FakeConnection:
             "caption_search": "old",
             "caption_replacement": "new",
         }
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        self.fetches.append((query, args))
+        return [
+            {
+                "alias": "geral",
+                "destination_chat_id": "-100456",
+                "topic_id": None,
+            },
+            {
+                "alias": "novidades",
+                "destination_chat_id": "-100789",
+                "topic_id": 91,
+            },
+        ]
 
 
 class FakePool:
@@ -234,6 +257,7 @@ class DatabaseSettingsTests(unittest.IsolatedAsyncioTestCase):
         await database.set_destination("-100456")
         await database.set_topic(72)
         await database.set_caption("append", text="new caption")
+        await database.set_destination_and_topic("-100789", 91)
 
         self.assertEqual(settings.destination_chat_id, "-100123")
         self.assertEqual(settings.topic_id, 45)
@@ -244,6 +268,7 @@ class DatabaseSettingsTests(unittest.IsolatedAsyncioTestCase):
             pool.connection.executions[2][1],
             ("append", "new caption", None, None),
         )
+        self.assertEqual(pool.connection.executions[3][1], ("-100789", 91))
 
     async def test_initialization_migrates_old_replace_mode(self) -> None:
         pool = FakePool()
@@ -251,10 +276,184 @@ class DatabaseSettingsTests(unittest.IsolatedAsyncioTestCase):
 
         await database.initialize()
 
-        migration = pool.connection.executions[1][0]
+        self.assertTrue(
+            any(
+                "CREATE TABLE IF NOT EXISTS destination_aliases" in query
+                for query, _ in pool.connection.executions
+            )
+        )
+        migration = next(
+            query
+            for query, _ in pool.connection.executions
+            if "DROP CONSTRAINT IF EXISTS bot_settings_caption_mode_check" in query
+        )
         self.assertIn("DROP CONSTRAINT IF EXISTS bot_settings_caption_mode_check", migration)
         self.assertIn("SET caption_mode = 'replace_parcial'", migration)
         self.assertIn("'replace_total'", migration)
+
+    async def test_saves_alias_with_upsert_and_reads_destination_and_topic(self) -> None:
+        pool = FakePool()
+        database = Database(pool)
+        pool.connection.alias_row = {
+            "destination_chat_id": "-100789",
+            "topic_id": 91,
+        }
+
+        await database.save_destination_alias("novidades", "-100789", 91)
+        settings = await database.get_destination_alias("novidades")
+
+        self.assertEqual(
+            pool.connection.executions[0][1],
+            ("novidades", "-100789", 91),
+        )
+        self.assertIn("ON CONFLICT (alias) DO UPDATE", pool.connection.executions[0][0])
+        self.assertEqual(settings, ("-100789", 91))
+
+    async def test_returns_none_for_unknown_alias(self) -> None:
+        database = Database(FakePool())
+
+        self.assertIsNone(await database.get_destination_alias("ausente"))
+
+    async def test_lists_aliases_ordered_by_name(self) -> None:
+        pool = FakePool()
+        database = Database(pool)
+
+        aliases = await database.list_destination_aliases()
+
+        self.assertIn("ORDER BY alias", pool.connection.fetches[-1][0])
+        self.assertEqual(
+            aliases,
+            [
+                ("geral", "-100456", None),
+                ("novidades", "-100789", 91),
+            ],
+        )
+
+
+class DestinationAliasCommandTests(unittest.IsolatedAsyncioTestCase):
+    def make_update_and_context(
+        self,
+        database: SimpleNamespace,
+        args: list[str],
+    ) -> tuple[SimpleNamespace, SimpleNamespace, AsyncMock]:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=User(id=123, is_bot=False, first_name="owner"),
+            effective_chat=Chat(id=123, type=Chat.PRIVATE),
+            effective_message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(
+            args=args,
+            application=SimpleNamespace(
+                bot_data={
+                    "config": BotConfig("token", 123, "postgresql://localhost/db", 20),
+                    "database": database,
+                },
+            ),
+        )
+        return update, context, reply_text
+
+    async def test_save_command_persists_current_destination_and_topic(self) -> None:
+        database = SimpleNamespace(
+            get_settings=AsyncMock(
+                return_value=BotSettings(
+                    destination_chat_id="-100789",
+                    topic_id=91,
+                ),
+            ),
+            save_destination_alias=AsyncMock(),
+        )
+        update, context, reply_text = self.make_update_and_context(
+            database,
+            ["novidades"],
+        )
+
+        await save_destination_alias(update, context)
+
+        database.save_destination_alias.assert_awaited_once_with(
+            "novidades",
+            "-100789",
+            91,
+        )
+        reply_text.assert_awaited_once()
+
+    async def test_save_command_requires_a_configured_destination(self) -> None:
+        database = SimpleNamespace(
+            get_settings=AsyncMock(return_value=BotSettings()),
+            save_destination_alias=AsyncMock(),
+        )
+        update, context, reply_text = self.make_update_and_context(
+            database,
+            ["novidades"],
+        )
+
+        await save_destination_alias(update, context)
+
+        database.save_destination_alias.assert_not_awaited()
+        reply_text.assert_awaited_once()
+
+    async def test_load_command_restores_destination_and_topic_together(self) -> None:
+        database = SimpleNamespace(
+            get_destination_alias=AsyncMock(return_value=("-100789", 91)),
+            set_destination_and_topic=AsyncMock(),
+        )
+        update, context, reply_text = self.make_update_and_context(
+            database,
+            ["novidades"],
+        )
+
+        await load_destination_alias(update, context)
+
+        database.set_destination_and_topic.assert_awaited_once_with("-100789", 91)
+        reply_text.assert_awaited_once()
+
+    async def test_load_command_does_not_change_settings_for_unknown_alias(self) -> None:
+        database = SimpleNamespace(
+            get_destination_alias=AsyncMock(return_value=None),
+            set_destination_and_topic=AsyncMock(),
+        )
+        update, context, reply_text = self.make_update_and_context(
+            database,
+            ["ausente"],
+        )
+
+        await load_destination_alias(update, context)
+
+        database.set_destination_and_topic.assert_not_awaited()
+        reply_text.assert_awaited_once()
+
+    async def test_list_command_displays_alias_destination_and_topic_table(self) -> None:
+        database = SimpleNamespace(
+            list_destination_aliases=AsyncMock(
+                return_value=[
+                    ("novidades", "-100789", 91),
+                    ("geral", "-100456", None),
+                ],
+            ),
+        )
+        update, context, reply_text = self.make_update_and_context(database, [])
+
+        await list_destination_aliases(update, context)
+
+        database.list_destination_aliases.assert_awaited_once_with()
+        message, = reply_text.await_args.args
+        self.assertIn("<pre>", message)
+        self.assertIn("Apelido", message)
+        self.assertIn("Destino", message)
+        self.assertIn("Tópico", message)
+        self.assertIn("novidades", message)
+        self.assertIn("-100789", message)
+        self.assertIn("91", message)
+        self.assertIn("nenhum", message)
+        self.assertEqual(reply_text.await_args.kwargs, {"parse_mode": "HTML"})
+
+    async def test_list_command_reports_when_no_aliases_are_saved(self) -> None:
+        database = SimpleNamespace(list_destination_aliases=AsyncMock(return_value=[]))
+        update, context, reply_text = self.make_update_and_context(database, [])
+
+        await list_destination_aliases(update, context)
+
+        reply_text.assert_awaited_once_with("Nenhum apelido salvo.")
 
 
 class CaptionCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -487,6 +686,14 @@ class OwnerCommandMenuTests(unittest.IsolatedAsyncioTestCase):
                 MEDIA_WRITE_TIMEOUT_SECONDS,
             )
             self.assertIn("delivery_queue", application.bot_data)
+            registered_commands = {
+                command
+                for handler in application.handlers[0]
+                if isinstance(handler, CommandHandler)
+                for command in handler.commands
+            }
+            self.assertTrue({"salvar", "apontar"} <= registered_commands)
+            self.assertIn("listar_apelidos", registered_commands)
         finally:
             for request in application.bot._request:
                 await request.shutdown()
@@ -501,6 +708,9 @@ class OwnerCommandMenuTests(unittest.IsolatedAsyncioTestCase):
         scope = bot.set_my_commands.await_args.kwargs["scope"]
         self.assertEqual(commands, OWNER_COMMANDS)
         self.assertEqual(scope, BotCommandScopeChat(chat_id=123))
+        self.assertIn("salvar", {command.command for command in commands})
+        self.assertIn("apontar", {command.command for command in commands})
+        self.assertIn("listar_apelidos", {command.command for command in commands})
 
 
 if __name__ == "__main__":

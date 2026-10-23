@@ -29,6 +29,9 @@ Ao iniciar, o bot registra esses comandos no menu do Telegram para o chat privad
 | `/help` | Listar comandos |
 | `/destino <chat_id\|@username>` | Configurar o grupo, supergrupo ou canal de destino |
 | `/topico <message_thread_id\|off>` | Enviar para um tópico específico ou desativar o tópico |
+| `/salvar <apelido>` | Salvar o destino e tópico atuais com um apelido (substitui o apelido se já existir) |
+| `/apontar <apelido>` | Ativar o destino e tópico salvos com esse apelido |
+| `/listar_apelidos` | Listar apelidos salvos, destinos e tópicos em uma tabela |
 | `/id_topico` | No tópico do supergrupo de destino, enviar o ID do tópico ao proprietário no privado |
 | `/caption original` | Preservar a legenda da mensagem |
 | `/caption append <texto>` | Acrescentar o texto após a legenda, separado por uma nova linha |
@@ -42,8 +45,13 @@ Exemplo:
 ```text
 /destino -1001234567890
 /topico 456
+/salvar novidades
+/apontar novidades
+/listar_apelidos
 /caption append Confira esta publicação
 ```
+
+Os apelidos aceitam letras sem acento, números, hífen e sublinhado, com até 32 caracteres. `/salvar` guarda somente o destino e o tópico configurados; opções de legenda não são alteradas por `/apontar`. Carregar um apelido restaura os valores salvos sem consultar novamente a API do Telegram.
 
 Use `/id_topico` dentro do tópico do supergrupo para receber seu ID no privado; depois configure com `/topico <id>`. Use `/topico off` para publicar no chat sem especificar um tópico. Ao mudar o destino, a configuração anterior do tópico é removida para evitar enviar a um tópico inválido.
 

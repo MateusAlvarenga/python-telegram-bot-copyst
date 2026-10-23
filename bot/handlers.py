@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 ALBUM_WAIT_SECONDS = 0.7
 MAX_TIMEOUT_ATTEMPTS = 5
 DESTINATION_USERNAME = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
+DESTINATION_ALIAS = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 T = TypeVar("T")
 
 
@@ -83,6 +85,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Comandos (somente no chat privado do proprietário):\n"
         "/destino <chat_id|@username> — escolher grupo ou canal de destino\n"
         "/topico <message_thread_id|off> — definir ou remover o tópico\n"
+        "/salvar <apelido> — salvar o destino e tópico atuais\n"
+        "/apontar <apelido> — ativar destino e tópico salvos\n"
+        "/listar_apelidos — listar destinos e tópicos salvos\n"
         "/caption original — manter a legenda original\n"
         "/caption append <texto> — acrescentar texto em nova linha\n"
         "/caption prepend <texto> — inserir texto em nova linha antes da legenda\n"
@@ -175,6 +180,111 @@ async def topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await _settings(context).set_topic(topic_id)
     await _reply(update, f"Tópico configurado: {topic_id}.")
+
+
+async def save_destination_alias(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await _is_owner(update, context):
+        return
+    if len(context.args) != 1 or not DESTINATION_ALIAS.fullmatch(context.args[0]):
+        await _reply(
+            update,
+            "Uso: /salvar <apelido> (letras, números, _ ou -, até 32 caracteres)",
+        )
+        return
+
+    settings = await _settings(context).get_settings()
+    if settings.destination_chat_id is None:
+        await _reply(update, "Configure primeiro o destino com /destino.")
+        return
+
+    alias = context.args[0]
+    await _settings(context).save_destination_alias(
+        alias,
+        settings.destination_chat_id,
+        settings.topic_id,
+    )
+    await _reply(
+        update,
+        f"Destino e tópico atuais salvos como '{alias}'. "
+        "Se o apelido já existia, a configuração foi substituída.",
+    )
+
+
+async def load_destination_alias(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await _is_owner(update, context):
+        return
+    if len(context.args) != 1 or not DESTINATION_ALIAS.fullmatch(context.args[0]):
+        await _reply(
+            update,
+            "Uso: /apontar <apelido> (letras, números, _ ou -, até 32 caracteres)",
+        )
+        return
+
+    alias = context.args[0]
+    saved_settings = await _settings(context).get_destination_alias(alias)
+    if saved_settings is None:
+        await _reply(update, f"Não existe configuração salva com o apelido '{alias}'.")
+        return
+
+    destination_chat_id, topic_id = saved_settings
+    await _settings(context).set_destination_and_topic(destination_chat_id, topic_id)
+    topic_value = str(topic_id) if topic_id is not None else "nenhum"
+    await _reply(
+        update,
+        f"Configuração '{alias}' ativada: destino {destination_chat_id}; "
+        f"tópico {topic_value}.",
+    )
+
+
+async def list_destination_aliases(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await _is_owner(update, context):
+        return
+
+    aliases = await _settings(context).list_destination_aliases()
+    if not aliases:
+        await _reply(update, "Nenhum apelido salvo.")
+        return
+
+    rows = [
+        (alias, destination, str(topic) if topic is not None else "nenhum")
+        for alias, destination, topic in aliases
+    ]
+    headers = ("Apelido", "Destino", "Tópico")
+    widths = tuple(
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    )
+
+    def format_row(row: tuple[str, str, str]) -> str:
+        return " | ".join(value.ljust(width) for value, width in zip(row, widths))
+
+    header = format_row(headers)
+    separator = "-+-".join("-" * width for width in widths)
+    table_rows = [header, separator, *(format_row(row) for row in rows)]
+    chunks: list[list[str]] = []
+    current_rows = [table_rows[0], table_rows[1]]
+    for row in table_rows[2:]:
+        if sum(map(len, current_rows)) + len(current_rows) + len(row) + 1 > 3800:
+            chunks.append(current_rows)
+            current_rows = [table_rows[0], table_rows[1]]
+        current_rows.append(row)
+    chunks.append(current_rows)
+
+    message = update.effective_message
+    if message is None:
+        return
+    for chunk in chunks:
+        table = "\n".join(chunk)
+        await message.reply_text(f"<pre>{html.escape(table)}</pre>", parse_mode="HTML")
 
 
 async def current_topic_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -63,6 +63,16 @@ class Database:
             )
             await connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS destination_aliases (
+                    alias TEXT PRIMARY KEY,
+                    destination_chat_id TEXT NOT NULL,
+                    topic_id BIGINT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            await connection.execute(
+                """
                 ALTER TABLE bot_settings
                     DROP CONSTRAINT IF EXISTS bot_settings_caption_mode_check;
                 UPDATE bot_settings
@@ -122,6 +132,76 @@ class Database:
                 """,
                 topic_id,
             )
+
+    async def set_destination_and_topic(
+        self,
+        destination_chat_id: str,
+        topic_id: int | None,
+    ) -> None:
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE bot_settings
+                SET destination_chat_id = $1, topic_id = $2, updated_at = NOW()
+                WHERE singleton_id = 1
+                """,
+                destination_chat_id,
+                topic_id,
+            )
+
+    async def save_destination_alias(
+        self,
+        alias: str,
+        destination_chat_id: str,
+        topic_id: int | None,
+    ) -> None:
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO destination_aliases (
+                    alias, destination_chat_id, topic_id, updated_at
+                )
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (alias) DO UPDATE
+                SET destination_chat_id = EXCLUDED.destination_chat_id,
+                    topic_id = EXCLUDED.topic_id,
+                    updated_at = NOW()
+                """,
+                alias,
+                destination_chat_id,
+                topic_id,
+            )
+
+    async def get_destination_alias(
+        self,
+        alias: str,
+    ) -> tuple[str, int | None] | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT destination_chat_id, topic_id
+                FROM destination_aliases
+                WHERE alias = $1
+                """,
+                alias,
+            )
+        if row is None:
+            return None
+        return row["destination_chat_id"], row["topic_id"]
+
+    async def list_destination_aliases(self) -> list[tuple[str, str, int | None]]:
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT alias, destination_chat_id, topic_id
+                FROM destination_aliases
+                ORDER BY alias
+                """
+            )
+        return [
+            (row["alias"], row["destination_chat_id"], row["topic_id"])
+            for row in rows
+        ]
 
     async def set_caption(
         self,

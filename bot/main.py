@@ -22,6 +22,9 @@ from bot.handlers import (
     destination,
     help_command,
     handle_message,
+    list_destination_aliases,
+    load_destination_alias,
+    save_destination_alias,
     stop_album_buffers,
     status,
     topic,
@@ -34,6 +37,9 @@ OWNER_COMMANDS = (
     BotCommand("help", "Mostrar os comandos"),
     BotCommand("destino", "Configurar grupo ou canal de destino"),
     BotCommand("topico", "Configurar ou remover tópico"),
+    BotCommand("salvar", "Salvar destino e tópico com apelido"),
+    BotCommand("apontar", "Ativar destino e tópico salvos"),
+    BotCommand("listar_apelidos", "Listar apelidos, destinos e tópicos"),
     BotCommand("id_topico", "Consultar o ID do tópico atual"),
     BotCommand("caption", "Configurar a transformação da legenda"),
     BotCommand("status", "Ver a configuração atual"),
@@ -131,6 +137,9 @@ def create_application(config: BotConfig | None = None) -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("destino", destination))
     application.add_handler(CommandHandler("topico", topic))
+    application.add_handler(CommandHandler("salvar", save_destination_alias))
+    application.add_handler(CommandHandler("apontar", load_destination_alias))
+    application.add_handler(CommandHandler("listar_apelidos", list_destination_aliases))
     application.add_handler(CommandHandler("id_topico", current_topic_id))
     application.add_handler(CommandHandler("caption", caption))
     application.add_handler(CommandHandler("status", status))
