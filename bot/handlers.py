@@ -94,6 +94,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/caption replace_parcial <buscar> => <substituir> — substituir todas as ocorrências "
         "literais (diferencia maiúsculas de minúsculas)\n"
         "/caption replace_total <texto> — substituir toda a legenda\n"
+        "/salvar_caption — salvar a caption atual com um ID sequencial\n"
+        "/listar_captions — listar captions salvas\n"
+        "/ativar_caption <id> — ativar uma caption salva\n"
         "/status — mostrar configuração atual",
     )
 
@@ -367,6 +370,116 @@ async def caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/caption replace_parcial <buscar> => <substituir> | "
         "/caption replace_total <texto>",
     )
+
+
+def _caption_preset_description(
+    mode: str,
+    text: str | None,
+    search: str | None,
+    replacement: str | None,
+) -> str:
+    if mode == "original":
+        return "manter original"
+    if mode in {"append", "prepend"}:
+        return f"{mode}: {(text or '').replace(chr(10), ' ↵ ')}"
+    if mode == "replace_parcial":
+        return f"substituir {search!r} por {replacement!r}"
+    if mode == "replace_total":
+        return f"substituir por: {(text or '').replace(chr(10), ' ↵ ')}"
+    return mode
+
+
+async def save_caption_preset(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await _is_owner(update, context):
+        return
+    if context.args:
+        await _reply(update, "Uso: /salvar_caption")
+        return
+
+    settings = await _settings(context).get_settings()
+    preset_id = await _settings(context).save_caption_preset(
+        settings.caption_mode,
+        text=settings.caption_text,
+        search=settings.caption_search,
+        replacement=settings.caption_replacement,
+    )
+    await _reply(update, f"Caption atual salva com o ID {preset_id}.")
+
+
+async def load_caption_preset(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await _is_owner(update, context):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await _reply(update, "Uso: /ativar_caption <id>")
+        return
+
+    preset_id = int(context.args[0])
+    preset = await _settings(context).get_caption_preset(preset_id)
+    if preset is None:
+        await _reply(update, f"Não existe caption salva com o ID {preset_id}.")
+        return
+
+    mode, text, search, replacement = preset
+    await _settings(context).set_caption(
+        mode,
+        text=text,
+        search=search,
+        replacement=replacement,
+    )
+    await _reply(update, f"Caption ID {preset_id} ativada.")
+
+
+async def list_caption_presets(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await _is_owner(update, context):
+        return
+
+    presets = await _settings(context).list_caption_presets()
+    if not presets:
+        await _reply(update, "Nenhuma caption salva.")
+        return
+
+    rows = []
+    for preset_id, mode, text, search, replacement in presets:
+        description = _caption_preset_description(mode, text, search, replacement)
+        rows.append((str(preset_id), description.replace("|", "\\|")))
+    headers = ("ID", "Caption")
+    widths = tuple(
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    )
+
+    def format_row(row: tuple[str, str]) -> str:
+        return " | ".join(value.ljust(width) for value, width in zip(row, widths))
+
+    header = format_row(headers)
+    separator = "-+-".join("-" * width for width in widths)
+    table_rows = [header, separator, *(format_row(row) for row in rows)]
+    chunks = []
+    current_rows = table_rows[:2]
+    for row in table_rows[2:]:
+        if sum(map(len, current_rows)) + len(current_rows) + len(row) + 1 > 3800:
+            chunks.append(current_rows)
+            current_rows = table_rows[:2]
+        current_rows.append(row)
+    chunks.append(current_rows)
+
+    message = update.effective_message
+    if message is None:
+        return
+    for chunk in chunks:
+        await message.reply_text(
+            f"<pre>{html.escape(chr(10).join(chunk))}</pre>",
+            parse_mode="HTML",
+        )
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
