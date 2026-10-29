@@ -97,6 +97,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/salvar_caption — salvar a caption atual com um ID sequencial\n"
         "/listar_captions — listar captions salvas\n"
         "/ativar_caption <id> — ativar uma caption salva\n"
+        "/iniviar_agrupamento — guardar mídias na memória para envio posterior\n"
+        "/enviar_midias — enviar as mídias guardadas em grupos de até 10\n"
         "/status — mostrar configuração atual",
     )
 
@@ -482,6 +484,34 @@ async def list_caption_presets(
         )
 
 
+async def iniciar_agrupamento(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    if context.args:
+        await _reply(update, "Uso: /iniviar_agrupamento")
+        return
+    context.application.bot_data["grouping_active"] = True
+    await _reply(update, "Modo agrupador ativado. As próximas mídias serão guardadas na memória.")
+
+
+async def enviar_midias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    if context.args:
+        await _reply(update, "Uso: /enviar_midias")
+        return
+
+    grouped: list[Message] = context.application.bot_data.setdefault("grouped_media", [])
+    if not grouped:
+        await _reply(update, "Não há mídias guardadas para enviar.")
+        return
+
+    context.application.bot_data["grouped_media"] = []
+    for offset in range(0, len(grouped), 10):
+        _enqueue_delivery(grouped[offset:offset + 10], context)
+    await _reply(update, f"{len(grouped)} mídia(s) enviada(s) à fila em grupos de até 10.")
+
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _is_owner(update, context):
         return
@@ -501,7 +531,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         caption_value = f"replace_total: {settings.caption_text}"
     await _reply(
         update,
-        f"Destino: {destination_value}\nTópico: {topic_value}\nLegenda: {caption_value}",
+        f"Destino: {destination_value}\nTópico: {topic_value}\nLegenda: {caption_value}\n"
+        f"Modo agrupador: {'ativado' if context.application.bot_data.get('grouping_active', False) else 'desativado'}\n"
+        f"Mídias guardadas: {len(context.application.bot_data.get('grouped_media', []))}",
     )
 
 
@@ -818,6 +850,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     message = update.effective_message
     if message is None:
+        return
+    if context.application.bot_data.get("grouping_active", False):
+        if not _has_media(message):
+            await _reply(update, "Envie uma mídia compatível ou encaminhe uma mensagem com mídia.")
+            return
+        context.application.bot_data.setdefault("grouped_media", []).append(message)
         return
     if message.media_group_id:
         await _queue_album(message, context)

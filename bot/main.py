@@ -22,6 +22,8 @@ from bot.handlers import (
     destination,
     help_command,
     handle_message,
+    enviar_midias,
+    iniciar_agrupamento,
     list_caption_presets,
     list_destination_aliases,
     load_caption_preset,
@@ -48,6 +50,9 @@ OWNER_COMMANDS = (
     BotCommand("salvar_caption", "Salvar a configuração atual da caption"),
     BotCommand("listar_captions", "Listar captions salvas"),
     BotCommand("ativar_caption", "Ativar caption pelo ID"),
+    BotCommand("iniviar_agrupamento", "Guardar mídias para envio agrupado posterior"),
+    BotCommand("iniciar_agrupamento", "Guardar mídias para envio agrupado posterior"),
+    BotCommand("enviar_midias", "Enviar mídias guardadas em grupos de até 10"),
     BotCommand("status", "Ver a configuração atual"),
 )
 
@@ -139,6 +144,8 @@ def create_application(config: BotConfig | None = None) -> Application:
     application.bot_data["albums"] = {}
     application.bot_data["album_lock"] = asyncio.Lock()
     application.bot_data["delivery_queue"] = asyncio.Queue()
+    application.bot_data["grouping_active"] = False
+    application.bot_data["grouped_media"] = []
     application.add_handler(CommandHandler("start", about))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("destino", destination))
@@ -151,6 +158,9 @@ def create_application(config: BotConfig | None = None) -> Application:
     application.add_handler(CommandHandler("salvar_caption", save_caption_preset))
     application.add_handler(CommandHandler("listar_captions", list_caption_presets))
     application.add_handler(CommandHandler("ativar_caption", load_caption_preset))
+    application.add_handler(CommandHandler("iniviar_agrupamento", iniciar_agrupamento))
+    application.add_handler(CommandHandler("iniciar_agrupamento", iniciar_agrupamento))
+    application.add_handler(CommandHandler("enviar_midias", enviar_midias))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     application.add_error_handler(_log_error)
