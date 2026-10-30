@@ -97,7 +97,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/salvar_caption — salvar a caption atual com um ID sequencial\n"
         "/listar_captions — listar captions salvas\n"
         "/ativar_caption <id> — ativar uma caption salva\n"
-        "/iniviar_agrupamento — guardar mídias na memória para envio posterior\n"
+        "/iniciar_agrupamento — guardar mídias na memória para envio posterior\n"
+        "/parar_agrupamento — voltar ao envio normal\n"
         "/enviar_midias — enviar as mídias guardadas em grupos de até 10\n"
         "/status — mostrar configuração atual",
     )
@@ -488,10 +489,20 @@ async def iniciar_agrupamento(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not await _is_owner(update, context):
         return
     if context.args:
-        await _reply(update, "Uso: /iniviar_agrupamento")
+        await _reply(update, "Uso: /iniciar_agrupamento")
         return
     context.application.bot_data["grouping_active"] = True
     await _reply(update, "Modo agrupador ativado. As próximas mídias serão guardadas na memória.")
+
+
+async def parar_agrupamento(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_owner(update, context):
+        return
+    if context.args:
+        await _reply(update, "Uso: /parar_agrupamento")
+        return
+    context.application.bot_data["grouping_active"] = False
+    await _reply(update, "Modo agrupador desativado. O bot voltou ao modo normal.")
 
 
 async def enviar_midias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

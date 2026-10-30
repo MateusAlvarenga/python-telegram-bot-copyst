@@ -34,6 +34,7 @@ from bot.handlers import (
     caption,
     list_destination_aliases,
     load_destination_alias,
+    parar_agrupamento,
     save_destination_alias,
     transform_caption,
 )
@@ -666,6 +667,32 @@ class StartCommandTests(unittest.IsolatedAsyncioTestCase):
         reply_text.assert_awaited_once_with("Vem pro grupo ver mais: t.me/pra_bater")
 
 
+class GroupingCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_grouping_returns_bot_to_normal_mode(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=User(id=123, is_bot=False, first_name="owner"),
+            effective_chat=Chat(id=123, type=Chat.PRIVATE),
+            effective_message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(
+            args=[],
+            application=SimpleNamespace(
+                bot_data={
+                    "config": BotConfig("token", 123, "postgresql://localhost/db", 20),
+                    "grouping_active": True,
+                },
+            ),
+        )
+
+        await parar_agrupamento(update, context)
+
+        self.assertFalse(context.application.bot_data["grouping_active"])
+        reply_text.assert_awaited_once_with(
+            "Modo agrupador desativado. O bot voltou ao modo normal."
+        )
+
+
 class OwnerCommandMenuTests(unittest.IsolatedAsyncioTestCase):
     async def test_application_configures_timeouts_for_polling_and_bot_api(self) -> None:
         application = create_application(
@@ -694,6 +721,9 @@ class OwnerCommandMenuTests(unittest.IsolatedAsyncioTestCase):
             }
             self.assertTrue({"salvar", "apontar"} <= registered_commands)
             self.assertIn("listar_apelidos", registered_commands)
+            self.assertIn("iniciar_agrupamento", registered_commands)
+            self.assertIn("parar_agrupamento", registered_commands)
+            self.assertNotIn("iniviar_agrupamento", registered_commands)
         finally:
             for request in application.bot._request:
                 await request.shutdown()
